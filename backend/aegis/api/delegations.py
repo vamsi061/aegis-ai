@@ -29,6 +29,11 @@ async def create_delegation(body: DelegationCreate, session: AsyncSession = Depe
     try:
         result = await service.create_delegation(body)
     except DelegationError as exc:
+        if exc.code == "PRIVILEGE_ESCALATION":
+            # The service already wrote the denial evidence (security alert +
+            # DELEGATION_DENIED audit event). Commit it before raising so the
+            # request-scoped rollback cannot erase the append-only record.
+            await session.commit()
         code = 404 if exc.code == "AGENT_NOT_FOUND" else 403
         raise HTTPException(status_code=code, detail={"error": str(exc), "code": exc.code}) from exc
     return _out(result["delegation"], result["trace_id"])

@@ -9,7 +9,9 @@ description = "Aegis AI - Agentic AI Governance and Identity control plane"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
+    # windows: uvloop/httptools have no wheels there, so keep the pure-python stack
+    "uvicorn[standard]>=0.30; sys_platform != 'win32'",
+    "uvicorn>=0.30; sys_platform == 'win32'",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "sqlalchemy[asyncio]>=2.0.30",

@@ -101,3 +101,46 @@ async def test_grants_active_only_excludes_expired(client, db_session, agent_ids
     expired = [g for g in all_grants if g["grant_id"] == r.grant.grant_id]
     assert len(expired) == 1
     assert expired[0]["status"] == "EXPIRED"  # effective, not stored, status
+
+
+async def test_privilege_escalation_denial_is_persisted_over_http(client, db_session, agent_ids):
+    """POST /delegations returns 403 AND keeps the denial evidence (alert +
+    DELEGATION_DENIED audit event) after the request-scoped rollback."""
+    from aegis.models import AuditEvent, SecurityAlert
+    from aegis.schemas import DelegationCreate, DelegationScope
+    from aegis.services.audit import AuditService
+    from sqlalchemy import select
+
+    before_alerts = len((await client.get("/api/v1/alerts")).json())
+
+    resp = await client.post("/api/v1/delegations", json={
+        "source_agent_id": agent_ids["TravelAgent"],
+        "target_agent_id": agent_ids["EmailAgent"],
+        "requested_scope": {"capabilities": ["payment_transfer"]},
+        "ttl_seconds": 300,
+    })
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "PRIVILEGE_ESCALATION"
+
+    # The security alert must survive the rollback.
+    alerts = (await client.get("/api/v1/alerts")).json()
+    assert len(alerts) == before_alerts + 1
+    assert alerts[0]["alert_type"] == "PRIVILEGE_ESCALATION"
+    assert alerts[0]["status"] == "OPEN"
+
+    # And so must the DELEGATION_DENIED audit event on the same trace.
+    rows = (await db_session.execute(
+        select(AuditEvent)
+        .where(
+            AuditEvent.event_type == "DELEGATION_DENIED",
+            AuditEvent.trace_id == alerts[0]["trace_id"],
+        )
+    )).scalars().all()
+    assert len(rows) == 1
+    metadata = rows[0].metadata_json
+    assert metadata["policy_key"] == "DELEGATION-001"
+    assert "payment_transfer" in metadata["requested"]
+
+    # Alerts endpoint list is backed by the same rows the AuditService wrote.
+    listed = await AuditService(db_session).list_alerts()
+    assert any(a.alert_type == "PRIVILEGE_ESCALATION" and a.trace_id == alerts[0]["trace_id"] for a in listed)

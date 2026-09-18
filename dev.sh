@@ -36,6 +36,8 @@ TAIL2=""
 BACKEND_REUSED=0
 
 cleanup() {
+  [ -n "${BEAT_KEEPER:-}" ] && kill "$BEAT_KEEPER" 2>/dev/null
+  [ -n "${BEAT:-}" ] && rm -f "$BEAT" 2>/dev/null
   [ -n "$TAIL1" ]        && kill "$TAIL1" 2>/dev/null
   [ -n "$TAIL2" ]        && kill "$TAIL2" 2>/dev/null
   [ -n "$FRONTEND_PID" ] && kill "$FRONTEND_PID" 2>/dev/null
@@ -133,19 +135,30 @@ fi
 
 # --- 5. Launch ----------------------------------------------------------------------
 LOGS="$(mktemp -d /tmp/aegis-dev.XXXXXX)"
+BEAT="$LOGS/heartbeat"
+# Explicit venv interpreter: on Windows a bare `python` is often the Store shim.
+WATCHDOG="$BACKEND_DIR/scripts/watchdog.py"
 BLOG="$LOGS/backend.log"
 FLOG="$LOGS/frontend.log"
 
 if [ "$BACKEND_REUSED" -eq 0 ]; then
-  (cd "$BACKEND_DIR" && exec .venv/bin/uvicorn aegis.main:app --host 0.0.0.0 --port "$BACKEND_PORT") \
-    >"$BLOG" 2>&1 &
+  # The watchdog is the direct parent of uvicorn and ties its lifetime to this
+  # script's heartbeat, so the server can never be orphaned (even on SIGKILL).
+  cd "$BACKEND_DIR" || die "cannot enter $BACKEND_DIR"
+  AEGIS_HEARTBEAT="$BEAT" AEGIS_PORT="$BACKEND_PORT" \
+    .venv/bin/python "$WATCHDOG" >"$BLOG" 2>&1 &
   BACKEND_PID=$!
+  cd "$ROOT" || true
   bmsg "starting on :$BACKEND_PORT (pid $BACKEND_PID)"
 fi
 
-(cd "$FRONTEND_DIR" && exec node_modules/.bin/vite --port "$FRONTEND_PORT" --strictPort) \
-  >"$FLOG" 2>&1 &
+# Vite runs as a direct child of its own watchdog: the watchdog is the parent,
+# so it can reap Vite's whole process tree on shutdown.
+cd "$FRONTEND_DIR" || die "cannot enter $FRONTEND_DIR"
+AEGIS_HEARTBEAT="$BEAT" "$BACKEND_DIR/.venv/bin/python" "$WATCHDOG" -- \
+  node_modules/vite/bin/vite.js --port "$FRONTEND_PORT" --strictPort >"$FLOG" 2>&1 &
 FRONTEND_PID=$!
+cd "$ROOT" || true
 fmsg "starting on :$FRONTEND_PORT (pid $FRONTEND_PID)"
 
 tail -n 50 -F "$BLOG" 2>/dev/null | sed "s/^/$G$BP$N /" &
@@ -164,6 +177,10 @@ if wait_http "http://localhost:$FRONTEND_PORT/" 40; then
   fmsg "ready -> http://localhost:$FRONTEND_PORT"
 fi
 
+# Keep the heartbeat fresh so the watchdog-wrapped backend stays up.
+while :; do : >"$BEAT" 2>/dev/null || true; sleep 2; done &
+BEAT_KEEPER=$!
+
 log "console -> http://localhost:$FRONTEND_PORT | api -> $BACKEND_URL/api/v1 | Ctrl+C stops both"
 
 # --- 6. Stay in the foreground until a server exits -----------------------------------
@@ -172,6 +189,7 @@ while :; do
   [ "$BACKEND_REUSED" -eq 0 ] && { kill -0 "$BACKEND_PID" 2>/dev/null || backend_alive=0; }
   frontend_alive=1
   kill -0 "$FRONTEND_PID" 2>/dev/null || frontend_alive=0
+  : >"$BEAT" 2>/dev/null || true
   [ "$backend_alive" -eq 0 ] && break
   [ "$frontend_alive" -eq 0 ] && break
   sleep 1
