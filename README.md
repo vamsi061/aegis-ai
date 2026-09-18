@@ -2,6 +2,20 @@
 
 These documents are the source of truth for the first implementation of the Agentic AI Governance Framework.
 
+## Run it (one command)
+
+```bash
+./dev.sh
+```
+
+Starts PostgreSQL (if needed), the FastAPI backend on `:8000` and the Vite
+governance console on `:5173`. First run also creates `backend/.env`,
+the Python venv and installs npm dependencies. `Ctrl+C` stops both servers.
+
+- Console: http://localhost:5173
+- API: http://localhost:8000/api/v1 — Swagger: http://localhost:8000/docs
+- Tests: `cd backend && .venv/bin/python -m pytest` · `cd frontend && npm test`
+
 ## Documents
 
 - `docs/requirements.md` — functional and non-functional requirements
